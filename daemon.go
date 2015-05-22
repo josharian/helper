@@ -5,10 +5,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
-	"net/http"
 	"net/rpc"
 	"os"
 	"os/exec"
@@ -26,11 +26,11 @@ var (
 
 // connectToDaemon establishes a connection to a daemon,
 // starting one if necessary.
-func connectToDaemon() (client *rpc.Client, err error) {
+func connectToDaemon() (*rpc.Client, error) {
 	// Attempt to connect to an existing daemon.
-	client, err = rpc.DialHTTP("tcp", addr)
+	conn, err := net.Dial("tcp", addr)
 	if err == nil {
-		return
+		return rpc.NewClient(conn), nil
 	}
 
 	// Failed to connect. Try to start the daemon.
@@ -47,7 +47,12 @@ func connectToDaemon() (client *rpc.Client, err error) {
 		log.Printf("daemon failed to start: %v", err)
 	}
 
-	return rpc.DialHTTP("tcp", addr)
+	conn, err = net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return rpc.NewClient(conn), nil
 }
 
 // execDaemon attempts to start a new daemon.
@@ -83,6 +88,21 @@ func execDaemon() error {
 	return nil
 }
 
+type activityRWC struct {
+	C chan bool
+	io.ReadWriteCloser
+}
+
+func (a *activityRWC) Read(p []byte) (int, error) {
+	a.C <- true
+	return a.ReadWriteCloser.Read(p)
+}
+
+func (a *activityRWC) Write(p []byte) (int, error) {
+	a.C <- true
+	return a.ReadWriteCloser.Write(p)
+}
+
 // daemonMain is the daemon's main function.
 // rcvr is an RPC-enabled type.
 func daemonMain(rcvr interface{}) {
@@ -97,8 +117,8 @@ func daemonMain(rcvr interface{}) {
 	}
 
 	log.Print("setting up rpc")
-	rpcserv := rpc.NewServer()
-	err := rpcserv.Register(rcvr)
+	s := rpc.NewServer()
+	err := s.Register(rcvr)
 	if err != nil {
 		return
 	}
@@ -111,24 +131,27 @@ func daemonMain(rcvr interface{}) {
 	}
 	log.Printf("listening on %v", l.Addr())
 
-	log.Print("starting http server")
-	activityc := make(chan bool)
-	httpserv := http.Server{
-		Handler: rpcserv,
-		ConnState: func(conn net.Conn, state http.ConnState) {
-			log.Printf("conn state (%v): %v", conn.RemoteAddr(), state)
-			switch state {
-			case http.StateNew, http.StateActive, http.StateIdle:
-				activityc <- true
-			}
-		},
-	}
+	log.Print("starting server")
+	activityc := make(chan bool, 1)
 
-	go httpserv.Serve(l)
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				log.Printf("accept: %v", err)
+				return
+			}
+			a := activityRWC{
+				C:               activityc,
+				ReadWriteCloser: conn,
+			}
+			go s.ServeConn(&a)
+		}
+	}()
 
 	fmt.Println("READY")
 
-	// Loop until ttl elapses with no RPC activity.
+	// Loop until ttl elapses with no RPC reads or writes.
 	for {
 		select {
 		case <-activityc:

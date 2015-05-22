@@ -95,9 +95,11 @@ func connectToDaemon() net.Conn {
 		// to start the child. That's ok; one of us
 		// will win, and the other will fail, since
 		// the port will be in use. Whichever of us
-		// fails will just have to go it alone.
+		// fails will attempt to connect, below.
+		// We're now racing the daemon; if we win,
+		// then we have to go it alone (i.e. we lose).
 		// In practice, I don't expect this to occur,
-		// so being non-optimal is ok.
+		// much if ever, so being non-optimal is ok.
 		if err := startDaemon(); err != nil {
 			log.Printf("failed to start daemon: %v", err)
 		}

@@ -7,6 +7,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
+	"net/rpc"
 	"os"
 	"os/exec"
 	"sync"
@@ -34,10 +36,53 @@ func main() {
 		return
 	}
 
-	buf, err := ioutil.ReadAll(conn)
-	log.Printf("recvd=%s err=%v", buf, err)
+	client, err := rpc.DialHTTP("tcp", addr)
+	if err != nil {
+		log.Fatal("dialing:", err)
+	}
+
+	var reply string
+	err = client.Call("Server.Version", struct{}{}, &reply)
+	if err != nil {
+		log.Fatal("version error:", err)
+	}
+	fmt.Printf("version: %s\n", reply)
+
+	var n int
+	err = client.Call("Server.Requests", struct{}{}, &n)
+	if err != nil {
+		log.Fatal("reqs error:", err)
+	}
+	fmt.Printf("n reqs: %d\n", n)
+
 	log.Println("done")
 	return
+}
+
+type Server struct {
+	reqc chan bool  // all requests send on reqc; used for ttl implementation
+	mu   sync.Mutex // guards fields below
+	n    int        // number of requests
+}
+
+func (s *Server) Version(args struct{}, reply *string) error {
+	log.Println("version requested")
+	s.reqc <- true
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.n++
+	*reply = "v0"
+	return nil
+}
+
+func (s *Server) Requests(args struct{}, reply *int) error {
+	log.Println("n requests requested")
+	s.reqc <- true
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.n++
+	*reply = s.n
+	return nil
 }
 
 func connectToDaemon() net.Conn {
@@ -92,11 +137,6 @@ func startDaemon() error {
 	return nil
 }
 
-type connerr struct {
-	net.Conn
-	error
-}
-
 func startServer() {
 	if *logfile != "" {
 		f, err := os.OpenFile(*logfile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
@@ -119,39 +159,21 @@ func startServer() {
 	log.Printf("listening on %v", l.Addr())
 	fmt.Println("READY")
 
-	c := make(chan connerr)
+	s := Server{
+		reqc: make(chan bool),
+	}
+	rpc.Register(&s)
+	rpc.HandleHTTP()
+	go http.Serve(l, nil)
+
 	for {
-		log.Print("waiting for connection")
-		go func() {
-			conn, err := l.Accept()
-			c <- connerr{Conn: conn, error: err}
-		}()
+		log.Print("waiting for request")
 		select {
+		case <-s.reqc:
+			log.Print("got a request")
 		case <-time.After(*ttl):
 			log.Print("terminating due to inactivity")
 			return
-		case ce := <-c:
-			if ce.error != nil {
-				log.Printf("could not accept connection: %v", ce.error)
-				return
-			}
-			go handle(ce.Conn)
 		}
 	}
-	time.Sleep(5 * time.Second)
-}
-
-var (
-	nmu sync.Mutex
-	n   int
-)
-
-func handle(conn net.Conn) {
-	log.Printf("handling connection from %v", conn.RemoteAddr())
-	nmu.Lock()
-	defer nmu.Unlock()
-	n++
-	fmt.Fprintf(conn, "connection: %d", n)
-	conn.Close()
-	log.Printf("done with connection from %v", conn.RemoteAddr())
 }

@@ -132,7 +132,7 @@ func daemonMain(rcvr interface{}) {
 	log.Printf("listening on %v", l.Addr())
 
 	log.Print("starting server")
-	activityc := make(chan bool, 1)
+	activityc := make(chan bool, 16)
 
 	go func() {
 		for {

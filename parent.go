@@ -1,3 +1,5 @@
+// +build ignore
+
 package main
 
 import (
@@ -98,8 +100,8 @@ func connectToDaemon() net.Conn {
 		// fails will attempt to connect, below.
 		// We're now racing the daemon; if we win,
 		// then we have to go it alone (i.e. we lose).
-		// In practice, I don't expect this to occur,
-		// much if ever, so being non-optimal is ok.
+		// In practice, I don't expect this to occur
+		// much, if ever, so being non-optimal is ok.
 		if err := startDaemon(); err != nil {
 			log.Printf("failed to start daemon: %v", err)
 		}
